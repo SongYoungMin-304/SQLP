@@ -155,7 +155,8 @@ SELECT * FROM CUSTOMER WHERE LOGIN_ID = :?
 
 ### 데이터 저장 구조 및 I/O 매커니즘
 
-![Untitled](https://s3-us-west-2.amazonaws.com/secure.notion-static.com/a9731af3-537f-4876-b323-ad591df0b9ba/Untitled.png)
+![image](https://user-images.githubusercontent.com/56577599/232319149-e651c7b0-ab25-4251-a0cd-da002304dec8.png)
+
 
 ```mermaid
 flowchart LR
