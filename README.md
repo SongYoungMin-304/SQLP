@@ -222,3 +222,126 @@ n2 -->|물리적블록I/O| n4
 | MULTI BLOCKED I/O 방식 | SINGLE BLOCKED I/O 방식 |
 | 수레에 데이터가 많다 | 수레에 데이터가 적다. |
 |  | 반복적인 I/O |
+
+
+
+# 인덱스 구조 및탐색
+
+홍길동 학생을 찾는 방법
+
+1) 모든 교실을 돌면서 찾기
+
+2) 학생 명부를 조회해 홍길동 학생이 있는 교실만 찾아냄
+
+### 인덱스를 통한 데이터 탐색 과정
+
+1) 수직적 탐색 + 수평적 탐색을 통한 인덱스 탐색 진행
+
+2) 인덱스 탐색에서 나온 rowId를 통해서 테이블 랜덤 엑세스 
+
+### 인덱스 원리
+
+(SELECT * FROM 고객 WHERE 고객명 = ‘이재희’)
+
+1) 수직적 탐색 + 수평적 탐색을 통한 인덱스 탐색 진행
+
+![image](https://user-images.githubusercontent.com/56577599/232505207-b54c52f4-8fef-424f-b945-0262737ae8e2.png)
+
+
+
+1) ROOT 에서 “서” 로 확인을 해봤을 때 이재희는 서 보다 뒤에 있다. 
+
+→ 따라서 서 뒤에 있는 BRANCH 로 이동
+
+2) BRANCH 에서 계속 스캔을 하다가 이재희보다 뒤에 있는 이재홍을 확인
+
+→ 해당 LEAF로 내려간다.
+
+**—> 여기까지가 수직적 탐색**
+
+3) 이재희가 있는 곳에서 계속 조건에 만족하는 이재희를 찾는다.
+
+**—> 여기가 수평적 탐색**
+
+4) 인덱스 탐색을 통해서 가져온 ROW ID를 통해서 테이블에서 데이터를 가져온다.
+
+**—> 랜덤 액세스**  
+
+### **Index Range Scan**
+
+- 스캔 지점에 시작점과 종료점이 있어야함
+- 인덱스 컬럼이 가공되면 사용 못함(EX) 5월생의 데이터를 가져온다고 했을 때 인덱스의 시작점과 종료점을 알수 없기 때문(날짜 순으로 정렬)
+- IN 조건절에 대해서는 IN-LIST Iterator 방식을 사용(IN-LIST 갯수만큰 INDEX RANGE SCAN 반복, UNION ALL 처럼)
+- 인덱스의 선두컬럼이 가공되지 않으면 무조건 RANGE SCAN 이 가능한다.
+- 선두 컬럼만 가공되지 않는다고 하더라도 문제가 없는 건 아님(범위가 그만큼 안 줄어들기 때문)
+- 인덱스는 정렬이 되어있다. (인덱스 스캔을 할 수 있는 이유)
+→ 따라서 인덱스를 사용하면 ORDER BY 를 하더라도 SORT 연산을 하지 않는다.
+
+![image](https://user-images.githubusercontent.com/56577599/232505363-38e08ce9-4c24-46e0-b954-dd18322e6b21.png)
+
+
+### **Index Full scan**
+
+- 수직점 탐색을 하지 않고 수평적 탐색만 진행
+- ename, sal 순으로 인덱스가 생성이 되었을 때 조회 조건이 sal 만 있다면 range 시작 지점과 종료지점을 정의하기가 어려워서 전체를 스캔한다.
+- 즉 선두컬럼이 조회 조건에 없는 경우이다.
+- 인덱스 전체 스캔
+- 데이터가 적을 경우 효율적이지만 데이터가 많은 경우 그냥 테이블 full scan 이 좋다.(row id 로 테이블에 접근하는 건이 엄청 많을 거기 때문에,,)
+
+![image](https://user-images.githubusercontent.com/56577599/232505403-21f44dbe-38ab-4f2e-9b42-2827ed5ba487.png)
+
+
+![image](https://user-images.githubusercontent.com/56577599/232505436-d9d8c304-00c0-49d5-8d70-750feac9af4f.png)
+
+
+### **Index Unique scan**
+
+- 수직점 탐색으로만 데이터를 찾는 스캔 방식(= 조건으로 unique 인덱스)
+
+![image](https://user-images.githubusercontent.com/56577599/232505474-46b8307d-27a9-4926-a662-d78efbeb202d.png)
+
+
+### **Index Skip scan**
+
+- 인덱스의 선두 컬럼이 조회 조건에 없구 데이터가 별로 없을 때는 index full scan
+- 인덱스의 선두 컬럼이 조회 조건에 없구 데이터가 많은 경우 table full scan
+- **인덱스의 선두 컬럼이 조건절에 없어도 인덱스를 활용하는 새로운 스캔 방식
+(선두 컬럼의 Distinct Value 개수가 적고 후행 컬럼의 Distinct Value 개수가 많을 때 유용)**
+
+![image](https://user-images.githubusercontent.com/56577599/232505513-4a1c702b-1510-4b5b-ac74-8100f977bd22.png)
+
+
+![image](https://user-images.githubusercontent.com/56577599/232505544-b0e71340-31f8-4cb4-ae85-32b0792e3355.png)
+
+
+```sql
+select * from 사원 where 성별 = '남' and 연봉 between 2000 and 4000
+```
+
+1) 해당 쿼리를 한다면 3번 블럭을 수직적 탐색을 통해서 가져와서 rowid로 테이블을 접근한다.
+
+```sql
+select * from 사원 where 연봉 between 2000 and 4000
+```
+
+1) 해당 쿼리를 한다면 1번 블록(처음), 3번 블록 6번 블록, 7번 블록, 10번 블록(마지막)을 가져와서 rowId로 테이블에 접근한다.
+**→ 특정 블록만 가져온다**
+
+### **Index Fast Full scan**
+
+- Multiblock I/O 방식으로 스캔해서 INDEX FULL SCAN 보다 빠름
+(동시에 여러개의 브랜치에서 리프에 접근한다.)
+
+| Index Full Scan | Index Fast Full Scan |
+| --- | --- |
+| 인덱스 구조를 따라 스캔 | 세그먼트 전체를 스캔 |
+| 결과 집합 순서를 보장 | 결과집합 순서 보장 안됨 |
+| Single Block I/O | MultiBlock I/O |
+| 병렬 스캔 불가 | 병렬 스캔 가능 |
+| 인덱스가 포함되지 않은 컬럼 조회 시에도 사용 가능 | 인덱스에 포함된 컬럼으로만 조회할 때 사용 가능 |
+
+### **Index Range Scan Descending**
+
+- 뒤에서 앞으로 스캔하는 것만 다름(내림차순)
+
+![image](https://user-images.githubusercontent.com/56577599/232505608-24bb3da0-85f5-4db7-a9c8-714ae1793c4f.png)
