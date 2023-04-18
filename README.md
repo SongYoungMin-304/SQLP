@@ -345,3 +345,121 @@ select * from 사원 where 연봉 between 2000 and 4000
 - 뒤에서 앞으로 스캔하는 것만 다름(내림차순)
 
 ![image](https://user-images.githubusercontent.com/56577599/232505608-24bb3da0-85f5-4db7-a9c8-714ae1793c4f.png)
+
+
+
+
+# 인덱스 튜닝
+
+1) 아무리 데이터가 많아도 인덱스를 사용하니까 데이터가 금방 조회된다.
+
+2) 대량 데이터를 조회할 때 인덱스를 사용하니까 테이블 전체를 스캔할 때보다 훨씬 느리다.
+
+**TABLE ACCESS BY INDEX ROWID**
+
+![image](https://user-images.githubusercontent.com/56577599/232794599-54398cb7-c348-4b9c-9d5a-f240a1088715.png)
+
+
+- 인덱스를 스캔하는 이유는, 검색 조건을 만족하는 소량의 데이터를 인덱스에서 빨리 찾고 거기서 테이블 레코드를 찾아가기 위한 주소값, 즉 ROWID를 얻으려는 데 있다.
+
+- ROWID → 물리적 주소보다 논리적 주소에 가깝다.
+(물리적으로 직접 연결되지 않고 테이블 레코드를 찾아가기 위한 논리적 주소 정보를 담고 있기 때문이다.),
+**→ 즉 ROWID를 통해서 테이블에 접근하는 것은 생각보다 빠르지 않다.(BCHR 이 높아서 캐시에 있더라도, 데이터 블록이 수시로 버퍼캐시에서 밀려났다가 다시 캐싱되기 때문에)**
+- **인덱스 ROWID 는 우편번호(메모리 DB가 전화), 우편번호가 있더라도 시간이 꽤 걸림..**
+
+![image](https://user-images.githubusercontent.com/56577599/232794644-a27a1ed6-a500-4185-95ff-4dd4f606d102.png)
+
+
+### 인덱스 클러스터링 팩터
+
+→ 특정 컬럼을 기준으로 같은 값을 갖는 데이터가 서로 모여있는 정도
+
+![image](https://user-images.githubusercontent.com/56577599/232794677-32271ace-b86e-4e3f-9730-83638337b0f7.png)
+
+![image](https://user-images.githubusercontent.com/56577599/232794714-d205e26f-d3df-4631-a7bb-39ec3ae76fe9.png)
+
+![image](https://user-images.githubusercontent.com/56577599/232794753-f06357ee-407b-4768-b64a-ea1ee073d204.png)
+
+
+- 굵은 선이 실제 블록 I/O가 발생하는 경우
+- 클러스터링 팩터가 좋은 컬럼으로 인덱스를 작성하는 것이 블록 I/O를 감소시킬수 있다.
+
+### 인덱스 손익분기점
+
+- 인덱스 ROWID를 이용한 테이블 액세스는 생각보다 고비용 구조다
+- **따라서 읽어야 할 데이터가 일정량을 넘는 순간, 테이블 전체를 스캔하는 것보다 오히려 느려진다.**
+- TABLE FULL SCAN 은 몇건을 조회하던지 전부 동일!
+
+**※ 인덱스를 이용한 테이블 액세스가 Table Full Scan 보다 더 느려지게 만드는 가장 핵심적인 두가지 요인**
+
+1) Table Full Scan 은 시퀀셜 액세스인 반면, 인덱스 ROWID를 이용한 테이블 엑세스는 랜덤 액세스 방식이다.
+
+2) Table Full Scan 은 Multiblock I/O인 반면, 인덱스 ROWID를 이용한 테이블 액세스는 Single Block I/O 방식이다.
+
+![image](https://user-images.githubusercontent.com/56577599/232794809-36137f54-7f5e-47ff-96e0-2a8ceeb6ce31.png)
+
+
+→ 인덱스 클러스터링 팩터가 높을 수도 손익분기점이 높아진다.(데이터가 모여있어서 ROWID를 통해서 테이블에 접근하기가 쉽기 때문에)
+
+### 인덱스 컬럼 추가
+
+```sql
+EMP_X01 인덱스[DEPTNO, JOB]
+
+SELECT /*+INDEX(emp emp_x01) */ /*
+from emp
+where deptno = 30
+and sal >= 2000
+```
+
+1) 인덱스 스캔을 통해서 인덱스에서 deptno = 30 인 데이터를 전부 가져오고(ex) 6개) 
+2) 인덱스를 통해서 테이블 엑세스를 한다.(6개)
+
+```sql
+EMP_X01 인덱스[DEPTNO, JOB, SAL]
+
+SELECT /*+INDEX(emp emp_x01) */ /*
+from emp
+where deptno = 30
+and sal >= 2000
+```
+
+1) 인덱스 스캔을 통해서 인덱스에서 deptno = 30 인 데이터를 전부 가져오고(ex) 1개) 
+
+2) 인덱스를 통해서 테이블 엑세스를 한다.(1개)
+
+**※ 인덱스 스캔량은 줄지 않지만, 테이블 랜덤 액세스 횟수를 줄여준다.**
+
+※ 추가적으로 조회하는 모든 컬럼이 인덱스에 존재하면 테이블 액세스를 하지 않기 떄문에 성능이 좋다.
+
+**include 인덱스**
+
+```sql
+create index emp_x01 on emp(deptno) include(sal)
+
+create index emp_x02 on emp(deptno, sal)
+```
+
+→ EMP_X02 인덱스는 DEPTNO, SAL 컬럼 모두 루트와 브랜치 블록에 저장(수직전 탐색 가능)
+
+→ EMP_X01 인덱스는 SAL 컬럼을 리프 블록에만 저장해서 수평적 탐색에만 사용 가능함
+    (랜덤 액세스 횟수를 줄이는 용도로 사용한다. **따라서 소트 연상을 생략할 수 없다**.)
+
+### 인덱스 구조 테이블
+
+- 인덱스의 ROWID를 이용한 테이블 액세스가 고비용 구조이니, 랜덤 액세스가 발생하지 않도록 테이블을 인덱스 구조로 생성하는 것
+
+![image](https://user-images.githubusercontent.com/56577599/232794929-bc9dc8c9-a0c3-405e-83f0-faf7c4c89a25.png)
+
+
+### 인덱스 클러스터 테이블
+
+- 클러스터 키값이 같은 레코드를 한 블록에 모아서 저장하는 구조
+- 랜덤엑세스를 할때 블록 단위로 진행하는데 모아 놨기 때문에 랜덤엑세스를 줄일 수 있다.
+
+![image](https://user-images.githubusercontent.com/56577599/232794966-379fe676-5f31-40b6-8844-b5150ec2b2f9.png)
+
+
+※ 해시 클러스트 테이블
+
+→ 인덱스를 사용하지 않고 해시 알고리즘을 사용
