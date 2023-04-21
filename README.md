@@ -463,3 +463,83 @@ create index emp_x02 on emp(deptno, sal)
 ※ 해시 클러스트 테이블
 
 → 인덱스를 사용하지 않고 해시 알고리즘을 사용
+
+
+
+### 부분범위 처리 활용
+
+- fetch call 갯수 → 1억건을 조회하더라도 fetch size 100이면 느리지 않다.
+- 정렬이 있다면? → 느리지만 정렬조건이 인덱스에 있다면 엄청 느리지 않다.
+
+```sql
+SELECT 게시글ID, 제목, 작성자, 등록일시
+FROM 게시판
+WHERE 게시판구분코드 = 'A'
+ORDER BY 등록일시 DESC
+```
+
+1) 부분처리를 하려고 해도 소트연산을 생략할 수 없다.
+
+2) 인덱스가 [게시판 구분코드 + 등록일수] → 소트연산 생략 가능하다.(인덱스가 정렬되어있기 때문에)
+
+### 배치 I/O란?
+
+- 인덱스 RowId를 이용한 테이블 랜덤엑세스는 고비용
+- 바로 테이블에 접근하는 게 아니라 블록이 일정량 쌓이면 접근을 한다.
+- 대시 sort 연산이 해결되지 않음(바로바로 접근하는게 아니여서)
+- 인덱스를 믿고 정렬 생략하는 거를 지양해라(배치 i/o)
+
+### 인덱스 스캔 효율화
+
+![image](https://user-images.githubusercontent.com/56577599/233659574-a71b7685-4b49-453e-8e34-bb10706c5e7c.png)
+
+
+```sql
+WHERE C1 = 'B'
+```
+
+![image](https://user-images.githubusercontent.com/56577599/233659539-7851505d-2bb1-404e-9566-ff928959df89.png)
+
+
+```sql
+WHERE C1 ='B'
+AND C2 = 3
+```
+
+![image](https://user-images.githubusercontent.com/56577599/233659510-70a3e1d7-3857-4cc1-b053-1024a06f7c0a.png)
+
+
+```sql
+WHERE C1 = 'B'
+AND C2 >=3
+```
+
+![image](https://user-images.githubusercontent.com/56577599/233659478-de138704-069d-44c6-9f4d-e3ab3c051b1c.png)
+
+
+```sql
+WHERE C1 = 'B'
+AND C2 <=3
+```
+
+![image](https://user-images.githubusercontent.com/56577599/233659444-2fecada3-0759-4a00-9bf6-dc3ae55b9815.png)
+
+
+```sql
+WHERE C1 = 'B'
+AND C2 BETWEEN 2 AND 3
+```
+
+![image](https://user-images.githubusercontent.com/56577599/233659410-29bf6acd-405e-4ed2-8bb4-37d76fca0b27.png)
+
+
+```sql
+WHERE C1 BETWEEN 'A' AND 'C'
+AND C2 BETWEEN 2 AND 3
+```
+
+![image](https://user-images.githubusercontent.com/56577599/233659385-221d5942-e5c9-4824-ac73-bb6d6d208f51.png)
+
+
+- C1 조건절은 스캔 시작과 끝 지점을 결정하는 중요한 역할을 함
+- C2는 그렇지 못함, C1 =A,  C 구간에서는 어느정도 역할을 했지만 중간 C1 = ‘B’ 구간에서는 전혀 역할을 못 했다.
