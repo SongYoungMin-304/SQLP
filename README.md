@@ -639,3 +639,151 @@ C1  레코드는 모여있으나 C2, C3, C4 조건까지 적용하면 흩어짐(
 
 ![image](https://user-images.githubusercontent.com/56577599/233791293-03eacea7-3c20-475b-91e5-e313b9510b3e.png)
 
+### 인덱스 선행 컬럼이 등치(=) 조건이 아닐 때 생기는 비효율
+
+```sql
+SELECT *
+FROM 매물아파트매매
+WHERE 아파트시세코드 ='A01011350900056'
+AND 평형 = '59'
+AND 평형타입 = 'A'
+AND 인터넷매물 BETWEEN '1' AND '3'
+ORDER BY 입력일 DESC
+```
+
+1) 인덱스가 [아파트시세코드, 평형, 평형타입, 인터넷매물] 
+
+→ 선행컬럼이 모두 = 조건이기 때문에 전혀 비효율 없이 조건을 만족하는 세 건을 빠르게 찾음
+
+![image](https://user-images.githubusercontent.com/56577599/233793994-e1254437-d0f4-4395-8d84-ff710ab8bd6d.png)
+
+
+2) 인덱스가 [인터넷매물, 아파트시세코드, 평형, 평협타입]
+
+→ 선행컬림이 = 조건이 아니기 때문에 비효율적으로 처리됨
+
+![image](https://user-images.githubusercontent.com/56577599/233793990-35ee5c18-1eff-4ee4-8b0c-3c64ebd12ea7.png)
+
+
+### BETWEEN을 IN-List 로 전환
+
+```sql
+SELECT *
+FROM 매물아파트매매
+WHERE 아파트시세코드 ='A01011350900056'
+AND 평형 = '59'
+AND 평형타입 = 'A'
+AND 인터넷매물 in ('1','2','3')
+ORDER BY 입력일 DESC
+```
+
+![image](https://user-images.githubusercontent.com/56577599/233793983-88853ea5-d4aa-435c-a16f-3cee77222707.png)
+
+
+⇒ 수직적 탐색을 세번 진행한거(INLIST ITERATOR 오퍼레이션)
+
+![image](https://user-images.githubusercontent.com/56577599/233793979-d0a9a657-a350-453c-95b6-ac7ec6f6bb2f.png)
+
+
+해당 쿼리와 동일하다고 보면 된다.
+
+```sql
+SELECT *
+FROM 매물아파트매매
+WHERE 아파트시세코드 ='A01011350900056'
+AND 평형 = '59'
+AND 평형타입 = 'A'
+AND 인터넷매물 = '1'
+UNION ALL
+SELECT *
+FROM 매물아파트매매
+WHERE 아파트시세코드 ='A01011350900056'
+AND 평형 = '59'
+AND 평형타입 = 'A'
+AND 인터넷매물 = '2'
+UNION ALL
+SELECT *
+FROM 매물아파트매매
+WHERE 아파트시세코드 ='A01011350900056'
+AND 평형 = '59'
+AND 평형타입 = 'A'
+AND 인터넷매물 = '3'
+ORDER BY 입력일 DESC
+```
+
+### BETWEEN조건은 IN-List로 전환할 때 주의 사항
+
+![image](https://user-images.githubusercontent.com/56577599/233793969-8be0dad7-4325-4584-9ece-cd2a34e6c9fb.png)
+
+
+- IN-List 갯수가 많으면 우측처럼 수직적 탐색이 많이 발생한다.(비효율적)
+
+### Index Skip Scan 활용
+
+- Between 조건은 IN-List 조건으로 변환하지 않고도 같은 효과를 내는 방법
+
+```sql
+select count(*)
+from 월별고객별판매집계 t
+where 판매구분 = 'A'
+and 판매월 between '201801' and '201812'
+```
+
+```sql
+create index 월별고객별판매집계_IDX1 on 원별고객별판매집계(판매구분, 판매월);
+```
+
+→ 선행컬럼이 = 조건이여서 최적의 처리 
+
+```sql
+create index 월별고객별판매집계_IDX2 ON 월별고객별판매집계(판매월, 판매구분
+```
+
+![image](https://user-images.githubusercontent.com/56577599/233793963-0f76b971-0e36-4993-8d79-8b30a63ec756.png)
+
+
+- 인덱스 스캔 범위가 넓어져서 효율적이지 않다.
+
+**→ 이런 경우 in으로 바꾸는 방법도 있지만 index skip scan을 활용할 수도 있다.**
+
+```sql
+select /*+ INDEX_SS(t 월별고객별판매집계_IDX2) */ COUNT(*)
+from 원별고객별판매집계 t
+where 판매구분 ='A'
+and 판매월 between '201801' and '201812'
+```
+
+### IN 조건은 ‘=’ 인가?
+
+```sql
+SELECT *
+FROM 고객별가입상품
+WHERE 고객번호 = :cust_no
+AND 상품ID IN('NH0037','NH0041','NH0050')
+
+```
+
+```sql
+SELECT *
+FROM 고객별가입상품
+WHERE 고객번호 = :cust_no
+AND 상품ID ='NH0037'
+UNION ALL
+SELECT *
+FROM 고객별가입상품
+WHERE 고객번호 = :cust_no
+AND 상품ID ='NH0041'
+UNION ALL
+SELECT *
+FROM 고객별가입상품
+WHERE 고객번호 = :cust_no
+AND 상품ID ='NH0050'
+
+```
+
+→ 첫번째 쿼리가 아래처럼 풀리면 IN 조건이 =을 여러번 사용하는 것
+
+- IN 조건은 ‘=’이 아니다. IN 조건이 ‘=’이 되려면 IN=List Iterator 방식으로 풀려야 한다.
+- 그렇지 않으면 IN 조건은 필터 조건이다.
+- 무조건 IN 조건을 ‘=’ 조건으로 만들기 위해, IN-List Iterator 방식으로 푸는 것이 항상 효과적인가?
+→ 범위에 따라 다르다고 보면 된다.
