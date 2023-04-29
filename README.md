@@ -787,3 +787,78 @@ AND 상품ID ='NH0050'
 - 그렇지 않으면 IN 조건은 필터 조건이다.
 - 무조건 IN 조건을 ‘=’ 조건으로 만들기 위해, IN-List Iterator 방식으로 푸는 것이 항상 효과적인가?
 → 범위에 따라 다르다고 보면 된다.
+
+# NL 조
+
+```sql
+SELECT e.사원명, c.고객명, c.전화번호
+from 사원 e, 고객 c
+where e.입사일자 >= '19960101'
+and c.관리사원번호 = e.사원번호
+```
+
+![image](https://user-images.githubusercontent.com/56577599/235301320-05b28cad-f33b-48a4-bb56-0c7712df47fe.png)
+
+![image](https://user-images.githubusercontent.com/56577599/235301327-94ee2bd4-1f2b-4d5a-a977-40f5a76309ee.png)
+
+
+1) 사원_X1 인덱스에서 입사일자 ≥ ‘1996010’ 인 첫번째 레코드 확인
+
+2) 인덱스에서 읽은 ROWID로 사원 테이블 레코드를 찾아간다.
+
+3) 사원테이블에서 읽은 사원번호 ‘0006’으로 고객_X1 인덱스를 탐색
+
+4) 고객_X1 인덱스에서 읽은 ROWID로 고객 테이블 레코드를 찾아간다.
+
+플랜
+
+```sql
+SELECT STATEMENT Optimizer=ALL_ROWS
+  NESTED LOOPS
+    TABLE ACCESS (BY INDEX ROWID) OF '사원' (TABLE)
+      INDEX (RANGE SCAN) OF 사원_X1(INDEX)
+    TABLE ACCESS (BY INDEX ROWID) OF '고객' (TABLE)
+      INDEX (RANGE SCAN) OF 고객_X1(INDEX)
+```
+
+```sql
+select /*+ ordered use_nl(c) index(e) index(c) */
+       e.사원번호, e.사원명, e.입사일자
+      ,c.고객번호, c.고객명, c.전화번호, c.최종주문금액
+from  사원 e, 고객 c
+where c.관리사원번호 = e.사원번호
+and   e.입사일자 >= '19960101'
+and   e.부서코드  = 'Z123'
+and   c.최종주문금액 >= 2000
+
+-- 인덱스 구성
+사원_px : 사원번호
+사원_x1 : 입사일자
+고객_px : 고객번호
+고객_x1 : 관리사원번호
+고객_x2 : 최종주문 금액
+```
+
+1) 사원_x1 인덱스 스캔(입사일자) + 부서코드로도 스캔(테이블스캔)
+
+2) 1) 돌면서 조인 조건에 있는 사원번호를 통해서 고객 스캔(고객_x1) + 최종주문금액(테이블스캔)
+
+![image](https://user-images.githubusercontent.com/56577599/235301346-44711e3f-3eb3-4b57-bb0a-f7b4b43442ba.png)
+
+**NL 조인 튜닝 포인트**
+
+1) 랜덤 엑세스 위주의 조인방식
+
+2) 한 레코드 씩 순차적으로 진행
+
+3) 소량의 데이터를 처리하거나 부분범위 처리
+
+→ 조인 순서를 통해서 튜닝 가능
+EX) 사원 입사일자 조건이 너무 많은 경우 사원이 앞에 있으면 JOIN 횟수가 많아짐
+      반대로 고객의 최종 주문 금액이 20000 이상인 사원이 너무 많으면 고객을 앞으로 옮기면 비효율
+
+**NL 조인 확장 매커니즘**
+
+- 오라클은 NL 조인 성능을 높이기 위해 테이블 prefetch, 배치 I/O기능 도입
+- 테이블 PREFETCH : 인덱스를 통해서 테이블을 액세스하다가 디스크 I/O 필요해지면 미리 읽음
+- 배치I/O : 디스크 I/O CALL 을 미뤗다가 읽을 블록이 일정량 쌓이 한꺼번에 처리
