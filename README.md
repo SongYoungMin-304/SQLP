@@ -944,3 +944,166 @@ end
 2) 조인 조건식이 아예 없는 조인
 
 **3) 인덱스가 조인 컬럼에 없어도사용하면 좋을 것 같다.**
+
+# 해시 조인
+
+### 기본매커니즘
+
+1) Build 단계 : 작은 쪽 테이블(Build Input)을 읽어 해시 테이블(해시 맵)을 생성한다.
+
+2) Probe 단계 : 큰 쪽 테이블(Probe Input)을 읽어 해시 테이블을 탐색하면서 조인한다.
+
+```sql
+select /*+ ordered use_hash(c) */
+       e.사원번호, e.사원명, e.입사일자
+      ,c.고객번호, c.고객명, c.전화번호, c.최종주문금액
+from 사원 e, 고객 c
+where c.관리사원번호 = e.사원번호
+and   e.입사일자 >= '19960101'
+and   e.부서코드 = 'Z123'
+and   c.최종주문금액 >= 20000
+```
+
+![image](https://user-images.githubusercontent.com/56577599/235334717-6ad3dbe5-d5ad-4deb-a2cd-dbd02fb6f686.png)
+
+
+```sql
+select 사원번호, 사원명, 입사일자
+from 사원
+where 입사일자 >= '19960101'
+and   부서코드 = 'Z123'
+```
+
+1) Build 단계: 위에 조건에 해당하는 사원 데이터를 읽어 해시 테이블을 생성한다.
+(조인 컬럼인 사원번호를 해시 테이블 키 값으로 사용한다.)
+
+```sql
+select 고객번호, 고객명, 전화번호, 최종주문금액, 관리사원번호
+from 고객
+where 최종주문금액 >= 20000
+```
+
+2) Probe 단계: 위에 조건에 해당하는 고객 데이터를 하나씩 읽어 앞서 생성한 해시테이블을 탐색한다.
+
+```sql
+begin 
+ for outer in (select 고객번호, 고객명, 전화번호, 최총주문금액, 관리사원번호 
+               from 고객 
+               where 최총주문금액 >= 20000) 
+ loop -- outer 루프
+      for inner in (select 사원번호, 사원명, 입사일자 
+                    from PGA 생성한-사원- 해시맵               
+                    where 사원번호 = outer 관리사원번호) 
+      loop -- inner 루프 
+        dbms_output . put_line ( · · · ) ; 
+      end loop; 
+ end loop; 
+end;  
+```
+
+![image](https://user-images.githubusercontent.com/56577599/235334727-9ed32569-f8d5-47eb-a336-8620d33757df.png)
+
+
+### 해시 조인이 빠른 이유
+
+1) Hash Area에 생선한 해시테이블을 이용한다는 점만 다를 조인 nl과 프로세싱이 같다.
+
+2) 해시 테이블을 PGA 영역에 할당하기 때문에 빠르다.(소트 머지 조인이 빠른 이유와 동일)
+
+3) 소트머지보다 빠른 이유는 PGA 집합을 만들때 정렬을 안하기 때문
+
+### 해시 조인 실행계획 제어
+
+```sql
+select /*+ use_hash(e c) */
+       e.사원번호, e.사원명, e.입사일자
+      ,c.고객번호, c.고객명, c.전화번호, c.최종주문금액
+from 사원 e, 고객 c
+where c.관리사원번호 = e.사원번호
+and   e.입사일자 >= '19960101'
+and   e.부서코드 = 'Z123'
+and   c.최종주문금액 >= 20000
+```
+
+```sql
+SELECT STATEMENT Optimizer=ALL_ROWS
+  HASH JOIN
+   TABLE ACCESS (BY INDEX ROWID) OF '사원' (TABLE)
+     INDEX (RANNGE SCAN) OF '사원_X1' (INDEX)
+   TABLE ACCESS (BY INDEX ROWID) OF '고객' (TABLE)
+     INDEX (RANNGE SCAN) OF '고객_N1' (INDEX)   
+```
+
+- ues_hash 힌트만 사용했으므로 Build Input을 옵티마이저가 선택하는데, 일반적으로 둘 중 카디널리티가 작은 테이블을 선택한다.(사원이 Build Input)
+
+```sql
+select /*+ leading(e) use_hash(c) */
+       e.사원번호, e.사원명, e.입사일자
+      ,c.고객번호, c.고객명, c.전화번호, c.최종주문금액
+from 사원 e, 고객 c
+where c.관리사원번호 = e.사원번호
+and   e.입사일자 >= '19960101'
+and   e.부서코드 = 'Z123'
+and   c.최종주문금액 >= 20000
+```
+
+- e를 먼저 앞으로 정의 가능(leading)
+
+```sql
+select /*+ use_hash(e c) swap_join_inputs(e) */
+       e.사원번호, e.사원명, e.입사일자
+      ,c.고객번호, c.고객명, c.전화번호, c.최종주문금액
+from 사원 e, 고객 c
+where c.관리사원번호 = e.사원번호
+and   e.입사일자 >= '19960101'
+and   e.부서코드 = 'Z123'
+and   c.최종주문금액 >= 20000
+```
+
+- swap_join_inputs 힌트로 Build Input을 직접 선택하는 방법도 있다.
+
+### 세 개 이상 테이블 해시 조인
+
+![image](https://user-images.githubusercontent.com/56577599/235334741-953abed5-8a62-4d70-96a3-bfeaeb84dbca.png)
+
+
+```sql
+select *
+from A, B, C
+where A.key = B.key
+and   B.key = C.key
+```
+
+```sql
+select *
+from A, B, C
+where A.key = B.key
+and   A.key = C.key
+```
+
+![image](https://user-images.githubusercontent.com/56577599/235334748-34cd97db-b231-49ab-b78d-ce5a29728497.png)
+
+
+
+### 조인 메소드 선택 기준
+
+![image](https://user-images.githubusercontent.com/56577599/235334762-45083ceb-fd73-4a7c-9101-555e136c433e.png)
+
+
+1) 소량 데이터 조인할 때 →NL 조인
+
+2) 대량 데이터 조인할 때 → 해시 조인
+
+3) 대량 데이터 조인인데 히시 조인으로 처리할 수 없는 때, 즉 조인 건식이 등치(=) 조건이 아닐때(조인 조건식이 아예 없는 카테시안 곱 포함 → 소트 머지 좆인
+
+- NL 조인과 해시 조인과 성능이 같으면, NL 조인
+- 해시 조인과 약간 더 빨라도 NL 조인
+- NL 조인보다 해시 조인이 매우 빠른 경우, 해시 조인
+
+**해시 조인 쓰는 경우**
+
+1) 수행 빈도가 낮고
+
+2) 쿼리 수행 시간이 오래 걸리는
+
+3) 대량 데이터 조인할 때
