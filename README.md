@@ -1107,3 +1107,563 @@ and   A.key = C.key
 2) 쿼리 수행 시간이 오래 걸리는
 
 3) 대량 데이터 조인할 때
+
+
+
+# 서브쿼리 조인
+
+![image](https://user-images.githubusercontent.com/56577599/235413164-4370de8f-5ead-4a2a-9f3b-0cca677c3a26.png)
+
+
+1) 인라인 뷰(Inline View) : FROM 절에 사용한 서브쿼리를 말한다.
+
+2) 중첩된 서브쿼리(Nested Subquery) : 결과집합을 한정하기 위해 WHERE 절에 사용한 서브쿼리를 말한다. 특히, 서브쿼리가 메인 쿼리 컬럼을 찾조하는 형태를 ‘상관관계 있는 서브쿼리’ 라고 부른다.
+
+3) 스칼라 서브쿼리 : 한 레코드당 정확히 하나의 값을 반환하는 서브쿼리다. 주로 SELECT-LIST 에서 사용하지만 몇 가지 예외사항을 제외하면 컬럼이 올 수 있는 대부분 위치에 사용할 수 있다.
+
+### 중첩된 서브쿼리
+
+```sql
+<원본쿼리
+select c.고객번호, c.고객명
+from   고객 c
+where  c.가입일시 >= trunc(add_months(sysdate - 1), 'mm')
+and    exists(
+            select 'x'
+            from   거래
+            where  고객번호 = c.고객번호
+            and    거래일시 >= trunc(sysdate, 'mm'))
+
+<쿼리 블록 1>
+select c.고객번호, c고객명
+from 고객 c
+where c.가입일시 >= trunc(add_months(sysdate, -1),'mm')
+
+<쿼리블록2>
+select 'x'
+from 거래
+where 고객번호 = :cust_no -- 메인쿼리를 참조하는 조건절은 변수로 처리
+and   거래일시 >= trunc(sysdate, 'mm');
+
+```
+
+```sql
+< 원본 쿼리 >
+select 고객번호, 고객명, t. 평균거래, t. 최소거래, 최대거래 
+from 고객 c 
+     ,(select 고객번호, avg{ 거래금액) 평균거래 
+            , min( 거래금액) 최소거래, max( 거래금액) 최대거래 
+       from 거래 
+       where 거래일시 >= trunc(sysdate, 'mm') 
+       group by 고객번호 ) t 
+where 가입일시 >= trunc(add_months(sysdate, -1), 'mm') 
+and 고객번호 = 고객번호 
+
+< 쿼리 블록 1 >
+select 고객번호, 고객명, 평균거래, t. 최소거래, 최대거래 
+from 고객 c, SYS VW TEMP t
+where c. 가입일시 >= trunc(add_months(sysdate, -1 )， 'mm') 
+and 고객번호 = 고객번호 
+
+< 쿼리 불룩 2 >
+select 고객번호, avg( 거래금액) 평균거래 
+      , min( 거래금액) 최소거래, max( 거래금액) 최대거래 
+from 거래 
+where 거 래 일 시 >= trunc( sysdate, 'mm') 
+group by 고객 번호
+```
+
+- 서브쿼리별로 블록을 만들어서 실행함
+- 블록에 대한 최적화도 확인 필요
+
+### 필터 오퍼레이션
+
+**/*+ no_unnest */**
+
+→ 서브쿼리를 풀어내지 말고 그대로 수행하라고 옵티마이저에 지시하는 힌트
+
+```sql
+select c.고객번호, c.고객명
+from 고객 c
+where c.가입일시 >= trunc(add_months(sydate -1),'mm')
+and exists(
+    select /*+no_unnest */ 'x'
+    from 거래
+    where 고객번호 = c.고객번호
+    and   거래일시 >= trunc(sysdate, 'mm'))
+
+-- PLAN
+SELECT STATEMENT Optimizer=ALL_ROWS
+  FILTER
+   TABLE ACCESS (BY INDEX ROWID) OF '고객' (TABLE)
+     INDEX (RANGE SCAN) OF '고객_X01' (INDEX)
+   INDEX(RANGE SCAN) OF '거래_X01' (INDEX)
+```
+
+- 필터 오퍼레이션은 기본적으로 NL 조인과 처리 루틴이 값다.
+- FILTER 를 NESTED LOOPS 로 치환하고 처리 루틴을 해석하면 된다.
+
+차이점
+1) 필터는 메인쿼리(고객)의 한 로우가 서브쿼리(거래)의 한 로우와 조인에 성공하는 순간 진행을 멈추고, 메인쿼리의 다음 로우를 계속 처리함
+
+```sql
+begin
+  for outer in(select 고객번호, 고객명 from 고객 where...)
+  loop 
+    for inner in(select 'x' from 거래 where 고객번호 = outer.고객번호 and...)
+    loop
+      dbms_output.put_line(outer.고객번호 || ',' || outer.고객명);
+      exit; -- 조인에 성공하면 inner loop exit
+    end loop;
+   end loop;
+end;
+```
+
+2) 필터는 캐싱 기능을 갖는다.
+
+3) 필터 서브쿼리는 일반 NL 조인과 달리 메인쿼리에 종속되므로 조인 순서가 고정된다.
+
+**서브쿼리 Unnesting**
+
+```sql
+select c.고객번호, c.고객명
+from 고객 c
+where c.가입일시 >= trunc(add_months(sydate -1),'mm')
+and exists(
+    select /*+unnest nl_sj */ 'x'
+    from 거래
+    where 고객번호 = c.고객번호
+    and   거래일시 >= trunc(sysdate, 'mm'));
+
+-- PLAN
+SELECT STATEMENT Optimizer=ALL_ROWS
+  NESTED LOOP(SEMI)
+   TABLE ACCESS (BY INDEX ROWID) OF '고객' (TABLE)
+     INDEX (RANGE SCAN) OF '고객_X01' (INDEX)
+   INDEX(RANGE SCAN) OF '거래_X01' (INDEX)
+```
+
+- Unnesting 하고 나면 일반 조인문처럼 다양한 최적화 기법을 사용할 수 있다.
+- unnest 와 nl_sj 힌트를 함께 사용했으므로 NL 세미조인 방식으로 실행
+- 오라클 10g 부터는 NL 세미조인도 캐싱 기능
+
+**서브쿼리 Unnesing + leading**
+
+```sql
+select /*+ leading(거래@subq) use_nl(c) */ c.고객번호, c.고객명
+from 고객 c
+where c.가입일시 >= trunc(add_months(sydate -1),'mm')
+and exists(
+    select /*+ qb_name(subq) unnest*/ 'x'
+    from 거래
+    where 고객번호 = c.고객번호
+    and   거래일시 >= trunc(sysdate, 'mm'));
+
+-- PLAN
+SELECT STATEMENT Optimizer=ALL_ROWS
+  NESTED LOOP
+    NESTED LOOP
+      SORT (UNIQUE)
+       TABLE ACCESS (BY INDEX ROWID) OF '거래' (TABLE)
+         INDEX (RANGE SCAN) OF '거래_X02' (INDEX)
+      INDEX(RANGE SCAN) OF '고객_X01' (INDEX)
+    TABLE ACCESS (BY INDEX ROWID) OF '고객' (TABLE)
+```
+
+- 거래를 먼저 스캔하고 그 이후에 고객을 스캔한다.
+- 고객에 대한 데이터가 많고 거래에 대한 데이터가 적을 때 효율적
+- SORT(UNIQUE) = 서브쿼리에서 중복 데이터 제거
+- 아래의 쿼리와 비슷
+
+```sql
+select /*+ no_merge(t) leading(t) use_nl(c) */ c.고객번호, c.고객명
+from (select distinct 고객번호
+      from 거래
+      where 거래일시 >= trunc(sysdate, 'mm')) t, 고객 c
+where c.가입일시 >= trunc(add_months(sysdate, -1), 'mm')
+and   c.고객번호 = t.고객번호
+```
+
+**서브쿼리 Unnesting + hash_sj**
+
+```sql
+select c.고객번호, c.고객명
+from 고객 c
+where c.가입일시 >= trunc(add_months(sydate -1),'mm')
+and exists(
+    select /*+ unnest hash_sj*/ 'x'
+    from 거래
+    where 고객번호 = c.고객번호
+    and   거래일시 >= trunc(sysdate, 'mm'));
+
+-- PLAN
+SELECT STATEMENT Optimizer=ALL_ROWS
+ FILTER
+   HASH JOIN (SEMI)
+     TABLE ACCESS (BY INDEX ROWID) OF '고객'(TABLE)
+       INDEX (RANGE SCAN) OF '고객_X01'(INDEX)
+     TABLE ACCESS (BY INDEX ROWID) OF '거래'(TABLE)
+       INDEX (RANGE SCAN) OF '거래_X02' (INDEX)
+```
+
+※ Unnesting 과 rownum
+
+```sql
+select 글번호, 제목, 작성자, 등록일시
+from 게시판 b
+where 게시판구분 ='공지'
+and   등록일시 >= trunc(sysdate -1)
+and   exists (select /*+ unnest nl_sj */ 'x'
+              from 수신대상자
+              where 글번호 = b.글번호
+              and   수신자 =:memb_no
+              and   rownum <=1)
+```
+
+- rownum 조건이 있어서 unnest 가 안되고 no_unnest 로 처리되서 세미조인 등의 조인이 적용이 안된다
+
+**서브쿼리 Pushing**
+
+```sql
+select /*+ leading(p) use_nl(t) */ count(distinct p.상품번호), sum(t.주문금액)
+from 상품 p, 주문 t
+where p.상품번호 = t.상품번호
+and   p.등록일시 >= trunc(add_months(sysdate, -3), 'mm')
+and   t.주문일시 >= trunc(sysdate - 7)
+and   exists (select 'x' from 상품분류
+              where 상품분류코드 = p.상품분류코드
+              and   상위분류코드 = 'AK')
+
+STATEMENT
+ SORT AGGREGATE
+  FILTER 
+   NESTED LOOPS
+    TABLE ACCESS FULL 상품
+    TABLE ACCESS BY INDEX ROWID 주문
+     INDEX UNIQUE SCAN 주문_PK
+   TABLE ACCESS BY INDEX ROWID 상품분류
+    INDEX UNIQUE SCAN 상품분류_PK
+```
+
+- 상품 풀스캔 이후 주문 PK 인덱스로 인해서 주문 스캔해서 NL 조인
+- NL 조인된 거를 FILTER 조인을 통해서 상품분류 테이블과 진행
+
+IF) 상품이 1000개가 나오고 조인에 성공한 주문 데이터가 60000개라면 **상품 + 주문 조인** 쿼리의 수행시간이 너무 길다.( 그 이후의 상품 분류에서 60000개에서 3000개로 변경)
+: 이런 경우에는 상품 분류를 앞쪽으로 옮기면 상품 → 주문으로 가는 조인의 갯수를 줄일 수 있다.
+
+```sql
+select /*+ leading(p) use_nl(t) */ count(distinct p.상품번호), sum(t.주문금액)
+from 상품 p, 주문 t
+where p.상품번호 = t.상품번호
+and   p.등록일시 >= trunc(add_months(sysdate, -3), 'mm')
+and   t.주문일시 >= trunc(sysdate - 7)
+and   exists (select /*+ NO_UNNEST PUSH_SUBQ */'x' from 상품분류
+              where 상품분류코드 = p.상품분류코드
+              and   상위분류코드 = 'AK')
+
+STATEMENT
+ SORT AGGREGATE
+   NESTED LOOPS
+    TABLE ACCESS FULL 상품
+     TABLE ACCESS BY INDEX ROWID 상품분류
+      INDEX UNIQUE SCAN 상품분류_PK
+    TABLE ACCESS BY INDEX ROWID 주문
+     INDEX UNIQUE SCAN 주문_PK
+```
+
+- 상품과 상품분류를 NL조인해서 수를 줄이고(150) 그걸 주문과 같이 처리 해서 전체적인 효율 증가
+
+### 뷰(VIEW)와 조인
+
+```sql
+select c.고객번호, c.고객명, t.평균거래, t.최소거래, t.최대거래
+from 고객 c
+    ,(select 고객번호, avg(거래금액) 평균거래
+             ,min(거래금액) 최소거래, max(거래금액) 최대거래
+      from 거래
+      where 거래일자 > trunc(sysdate, 'mm')
+      group by 고객번호) t
+where c.가입일시 >= trunc(add_months(sysdate, -1),'mm')
+and   t.고객번호 = c.고객번호
+
+-- execution plan
+
+SELECT STATEMENT 
+ NESTED LOOPS
+  NESTED LOOPS
+    VIEW
+      HASH (GROUP BY)
+        TABLE ACCESS (BY INDEX ROWID) OF 거래 (TABLE)
+          INDEX (RANGE SCAN) OF '거래_X01' (INDEX)
+    INDEX (RANGE SCAN) OF '고객_X01' (INDEX)
+  TABLE ACCESS (BY INDEX ROWID) OF '고객'
+```
+
+- 서브쿼리를 뷰로 만들고 고객 C와 NL조인을 한다.
+- 고객 테이블에서 ‘전월 이후 가입한 고객’을 필터링하는 조건이 인라인 뷰 바깥에 있다
+(인라인 뷰 안에서는 당월에 거래한 ‘**모든’** 고객의 거래 데이터를 읽어야 한다.
+
+**1) 뷰 머징**
+
+```sql
+select c.고객번호, c.고객명, t.평균거래, t.최소거래, t.최대거래
+from 고객 c
+    ,(select /*+ merge */ 고객번호, avg(거래금액) 평균거래
+             ,min(거래금액) 최소거래, max(거래금액) 최대거래
+      from 거래
+      where 거래일자 > trunc(sysdate, 'mm')
+      group by 고객번호) t
+where c.가입일시 >= trunc(add_months(sysdate, -1),'mm')
+and   t.고객번호 = c.고객번호
+
+-- execution plan
+
+SELECT STATEMENT 
+ HASH (GROUP BY)
+  NESTED LOOPS
+   TABLE ACCESS (BY INDEX ROWID) OF '고객'
+     INDEX (RANGE SCAN) OF '고객_X01'
+   TABLE ACCESS (BY INDEX ROWID) OF '거래'
+     INDEX (RANGE SCAN) OF '거래_X02'
+```
+
+- MERGE가 되면서 그냥 테이블 끼리 JOIN 된 것을 알 수 있다.
+- 아래의 쿼리와 동일하다고 보면 된다.
+
+```sql
+select c.고객번호, c.고객명
+      ,avg(t.거래금액) 평균거래, min(t.거래금액) 최소거래, max(t.거래금액) 최대거래
+from  고객 c, 거래 t
+where c . 가 입 일 시 >= trunc ( add_months ( sysdate , - 1 ) , 'mm' ) 
+and 고객번호 = 고객번호 
+and 거래일시 >= trunc(sysdate, 'mm' ) 
+group by 고객번호, 고객명
+```
+
+2**) 조인 조건 Pushdown**
+
+→ 11g 이후에 적용된 기능, 메인쿼리를 실행하면서 조인 조건절 값을 건건이 뷰 안으로 밀어넣는 기능
+
+```sql
+select c.고객번호, c.고객명, t.평균거래, t.최소거래, t.최대거래
+from 고객 c
+    ,(select /*+ merge push_pred */ 고객번호, avg(거래금액) 평균거래
+             ,min(거래금액) 최소거래, max(거래금액) 최대거래
+      from 거래
+      where 거래일자 > trunc(sysdate, 'mm')
+      group by 고객번호) t
+where c.가입일시 >= trunc(add_months(sysdate, -1),'mm')
+and   t.고객번호 = c.고객번호
+
+-- 플랜
+
+SELECT STATEMENT 
+ NESTED LOOPS
+   TABLE ACCESS (BY INDEX ROWID BATCHED)
+     INDEX (RANGE SCAN) OF '고객_X01' (INDEX)
+   VIEW PUSHED PREDICATE
+     SORT (GROUP BY)
+      TABLE ACCESS (BY INDEX ROWID BATCHED) OF '거래' (TABLE)
+        INDEX (RANGE SCAN) OF '거래_X02'
+        
+
+select c.고객번호, c.고객명, t.평균거래, t.최소거래, t.최대거래
+from 고객 c
+    ,(select /*+ merge push_pred */ 고객번호, avg(거래금액) 평균거래
+             ,min(거래금액) 최소거래, max(거래금액) 최대거래
+      from 거래
+      where 거래일자 > trunc(sysdate, 'mm')
+      and   고객번호 = c.고객번호
+      group by 고객번호) t
+where c.가입일시 >= trunc(add_months(sysdate, -1),'mm')
+and   t.고객번호 = c.고객번호
+
+```
+
+- 위와 같이 인라인 뷰에 조인 컬럼 조건을 넣는다고 보면 된다.
+- 즉 거래를 가져올때 거래일자로만 가져오는게 아니라 고객번호도 조건에 포함이다.
+
+### 스칼라 서브쿼리 조인
+
+**스칼라 서브쿼리의 특징**
+
+```sql
+select empno, ename, sal, hiberdate, GET_DNAME(e.deptno) as dname
+from emp e
+where sal >= 2000
+```
+
+- SELECT 쿼리를 메인 쿼리 건수 만큼 ‘재귀적으로’ 반복 실행한다.(GET_DNAME 에 있는 쿼리)
+
+```sql
+select empno, ename, sal, hibernate
+      ,(select d.dname from depth d where d.deptno = e.deptno) as dname
+from emp e
+where sal >= 2000
+
+-- 아래와 비슷한 효과
+select /* ordered use_nl(d) */ e.empno, e.name, e.sal, e.hibernate, d.dname
+from emp e, depth d
+where d.deptno(+) = e.deptno
+and   e.sal >= 2000
+```
+
+- 컨텍스트 스위칭 없이 메인쿼리와 서브쿼리를 한 몸체처럼 실행한다.
+- 스칼라 서브쿼리는 처리과정에서 **캐싱 작용** 이 일어난다.
+
+```sql
+select empno, ename, sal, hiberdate
+, (select GET_DNAME(e.deptno) from dual) as dname
+from emp e
+where sal >= 2000
+```
+
+- 함수에 캐싱 효과를 적용할 수 있다.
+
+**스칼라 서브쿼리 캐싱 부작용**
+
+1) 서브쿼리에서 나오는 사용하는 값(입력값)이 거의 무조건 다르면 캐싱을 써봤자 의미가 없다.
+(메모리만 먹을 뿐)
+
+**두개 이상의 값 반환**
+
+```sql
+select c.고객번호, c.고객명
+      ,(select round(avg(거래금액), 2) 평균거래금액
+        from 거래
+        where 거래일시 >= trunc(sysdate, 'mm')
+        and   고객번호 = c.고객번호)
+from    고객 c
+where   c.가입일시 >= trunc(add_months(sysdate, -1), 'mm')
+
+-- Execution plan
+SELECT STATEMENT 
+  SORT (AGGREGATE)
+    TABLE ACCESS (BY INDEX ROWID BATCHED) OF '거래' (TABLE)
+      INDEX (RANGE SCAN) OF '거래_X2' (INDEX)
+  TABLE ACCESS (FULL) OF '고객' (TABLE)
+    INDEX (RANGE SCAN) OF '고객_X01' (INDEX)
+```
+
+- NL과 비슷하지만 메인 쿼리가 아래에 있다는 점 존재
+
+```sql
+select c.고객번호, c.고객명
+      ,(select avg(거래금액), min(거래금액), max(거래금액)
+        from 거래
+        where 거래일시 >= trunc(sysdate, 'mm')
+        and   고객번호 = c.고객번호)
+from    고객 c
+where   c.가입일시 >= trunc(add_months(sysdate, -1), 'mm')
+
+```
+
+- 스칼라 서브 쿼리의 캐시 기능을 쓸수가 없다.
+
+```sql
+select c.고객번호, c.고객명
+      ,(select avg(거래금액)
+        from 거래
+        where 거래일시 >= trunc(sysdate, 'mm')
+        and   고객번호 = c.고객번호)
+      ,(select min(거래금액)
+        from 거래
+        where 거래일시 >= trunc(sysdate, 'mm')
+        and   고객번호 = c.고객번호)
+      ,(select max(거래금액)
+        from 거래
+        where 거래일시 >= trunc(sysdate, 'mm')
+        and   고객번호 = c.고객번호)
+from    고객 c
+where   c.가입일시 >= trunc(add_months(sysdate, -1), 'mm')
+```
+
+- 캐시는 사용가능하지만 거래 테이블에서 같은 데이터를 반복해서 읽는 비효율 존재
+
+```sql
+select 고객번호, 고객명 
+    , to_number(substr( 거래금액, 1, 10)) 평균거래금액 
+    , to_number(substr( 거래금액, 11, 10)) 최소거래금액 
+    , to_number(substr( 거래금액, 21 )) 최대거래금액 
+from ( 
+  select 고객번호, C. 고객명 
+     ,(select lpad(avg( 거래금액), 10) I l lpad(min( 거래금액), 10) I l max( 거래금액) 
+        from 거래 
+        where 거래일시 >= trunc ( sysdate , 'mm' ) 
+        and 고객번호 = 고객번호) 거래금액 
+from 고객 c 
+where 가입일시 >= trunc(add_months(sysdate, -1), 'mm')
+)
+```
+
+- SQL 튜너들이 전통적으로 많이 사용해 온 방식
+
+```sql
+select 고객번호, 고객명, 평균거래, 최소거래, 최대거래 
+from 고객 ( 
+    ,(select 고객번호, avg( 거래금액) 평균거래 
+           , min( 거래금액) 최소거래, max( 거래금액 ) 최대거래 
+      from 거래 
+      where 거 래 일 시 >= trunc ( sysdate , ' mm ' ) 
+      group by 고객번호) t 
+where c.가입일시 >= trunc(add_months(sysdate, ， 'mm') 
+and   t.고객번호(+) = 고객번호
+```
+
+- 그냥 인라인 뷰를 쓰면 편리하긴하다
+
+※ 두 개 이상의 값을 반화하고 싶을 때,   인라인 뷰 VS 스칼라 서브 쿼리
+
+인라인 뷰 :
+1) 뷰가 머징 되지 않았을 때 당월 거래 전체를 읽어야 하거나 
+
+2) 머징이 된다고 하더라도 GROUP BY 때문에 부분 처리가 안되는 문제 가 있다.
+
+—> 하지만 PUSH_PRED 방식이 생기면서 인라인 뷰 + no_merge push_pred를 쓰면 좋다.
+
+```sql
+select 고객번호, 고객명, 평균거래, 최소거래, 최대거래 
+from 고객 ( 
+    ,(select /*+ no_merge push_pred */ 
+            고객번호, avg( 거래금액) 평균거래 
+           , min( 거래금액) 최소거래, max( 거래금액 ) 최대거래 
+      from 거래 
+      where 거 래 일 시 >= trunc ( sysdate , ' mm ' ) 
+      group by 고객번호) t 
+where c.가입일시 >= trunc(add_months(sysdate, ， 'mm') 
+and   t.고객번호(+) = 고객번호
+
+-- execution plan
+SELECT STATEMENT
+ NESTED LOOPS
+   TABLE ACCESS (BY INDEX ROWID BATCHED) OF '고객' (TABLE)
+     INDEX (RANGE SCAN) OF '고객_X01' (INDEX)
+   VIEW PUSHED PREDICATE
+     SORT (GROUP BY) 
+       TABLE ACCESS (BY INDEX ROWID BATCHED) OF '거래' (TABLE)
+         INDEX (RANGE SCAN) OF '거래_X02'(INDEX)
+```
+
+**스칼라 서브쿼리 Unnesting**
+
+- 스칼라 서브쿼리도 NL 방식(SORT) 으로 조인하므로 캐싱 효과가 크지 않으면 랜던 I/O 부담이 있다.
+- 그래서 다른 조인 방식을 선택하기 위해 스칼라 서브쿼리를 일반 조인문으로 변환하고 싶을 때가 있다.
+
+```sql
+select c.고객번호, c.고객명
+      ,(select /*+ unnest */ round(avg( 거래금액), 2) 평균거래금액 
+        from 거래 
+        where 거 래 일 시 >= trunc ( sysdate, ' mm ' ) 
+        and 고객번호 = 고객번호)
+from    고객 c
+where   c.가입일시 >= trunc(add_months(sysdate, -1), 'mm')
+
+SELECT STATEMENT
+  HASH JOIN
+    TABLE ACCESS (FULL) OF '고객' (TABLE)
+    VIEW OF 'SYS.VW_SSQ_1' (VIEW)
+      HASH (GROUP BY)
+        TABLE ACCESS (FULL) OF '거래' (TABLE)
+```
+
+→ 스칼라 서브 쿼리이지만 HASH 사용
