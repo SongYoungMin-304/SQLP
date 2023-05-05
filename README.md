@@ -1667,3 +1667,139 @@ SELECT STATEMENT
 ```
 
 → 스칼라 서브 쿼리이지만 HASH 사용
+
+
+# 소트 튜닝
+## 소트 수행 과정
+
+메모리 소트 : 전체 데이터의 정렬 작업을 메모리 내에서 완료하는 것을 말하며, Internal Sort 라고도 한다.
+
+디스크 소트 : 할당받은 Sort Area 내에서 정렬을 완료하지 못해 디스크 공간까지 사용하는 경우를 말하며, External Sort 라고도 한다.
+
+![image](https://user-images.githubusercontent.com/56577599/236379057-66ab862f-13f9-444f-94c1-2bb10cc0f9da.png)
+
+- 소트가 최대한 발생 안하도록 처리해야 한다.
+- 발생하더라도 PGA 안에서 처리되게 하는게 좋다.
+- 그렇지 않다면 Temp Tablespace 를 사용하게 되고 그러면 Sort Area 문제도 있기 때문
+
+**(1) Sort Aggregate**
+→ Sort Aggregate는 아래처럼 전체 로우를 대상으로 집계를 수행할 때 나타난다. ‘Sort’ 라는 표현을 사용하지만, 실제로 데이터를 정렬하진 않는다. **Sort Area를 사용한다는 의미로 이해하면 된다.**
+
+```sql
+select sum(sal), max(sal), min(sal), avg(sal) from emp;
+
+-- 실행계획
+SELECT STATEMENT
+ SORT AGGREGATE
+  TABLE ACCESS FULL
+```
+
+- Sort Area SUM, MAX, MIN, AVG 값 구하는 절차
+1) Sort Area에 SUM, MAX, MIN, COUNT 값을 위한 변수를 각각 하나씩 할당한다.
+2) EMP 테이블 첫 번째 레코드에서 읽은 SAL 값을 SUM, MAX, MIN 변수에 저장하고, COUNT 변수에는 1을 저장한다.
+
+![image](https://user-images.githubusercontent.com/56577599/236379072-b29eadf1-6789-4d96-a768-a65a2a5de883.png)
+
+**(2) Sort Order by** 
+
+→ 데이터를 정렬할 때 나타난다.
+
+```sql
+select * from emp order by sal desc;
+
+-- 실행계획
+SELECT STATEMENT
+ SORT ORDER BY
+  TABLE ACCESS FULL
+```
+
+**(3) Sort Group by**
+
+→ 소팅 알고리즘을 사용해 그룹별 집계를 수행할 때 나타난다.
+
+```sql
+select deptno, sum(sal), max(sal), min(sal), avg(sal)
+from emp
+group by deptno
+order by deptno
+
+-- 실행계획
+SELECT STATEMENT
+ SORT GROUP BY
+  TABLE ACCESS FULL
+```
+
+![image](https://user-images.githubusercontent.com/56577599/236379100-5db4442d-1e5a-4b4b-9b17-c23e03a8446d.png)
+
+- 수천 명의 사원이 근무하는 회사, 부서가 4개, 부서코드로는 각각 10,20,30,40을 사용
+- 집계 하려고 할때 메모지 4개에다가 적는 다는 개념으로 가면
+- Sort Area 가 클 필요가 전혀 없다.
+
+```sql
+select deptno, sum(sal), max(sal), min(sal), avg(sal)
+from emp
+group by deptno
+
+-- 실행계획
+SELECT STATEMENT
+ HASH GROUP BY 
+  TABLE ACCESS FULL
+```
+
+- 오라클 10gR2 버전 부터는 order by 가 없으면 hash 로 처리
+
+![image](https://user-images.githubusercontent.com/56577599/236379121-07faa59d-ba0b-4de1-a707-80c56adab014.png)
+
+
+**(4) Sort Unique**
+
+```sql
+select /*+ ordered use_nl(dept) */ * from dept
+where deptno in(select /*+ unnest */ deptno
+                from emp where job = 'CLERT');
+
+-- 실행계획
+SELECT STATEMENT
+ NESTED LOOPS
+  SORT UNIQUE
+   TABLE ACCESS BY INDEX ROWID(EMP)
+    INDEX RANGE SCAN(EMP_JOB_IDX)
+  TABLE ACCESS BY INDEX ROWID(DEPT)
+   INDEX UNIQUE SCAN(DEPT_PK)
+```
+
+- 메인쿼리와 조인하기 전에 중복 레코드부터 제거해야한다.
+- 조인 컬럼에 UNIQUE 인덱스가 없으면 SORT UNIQUE 실행
+
+※ UNION, MINUS, INTERSECT 같은 집합(Set) 연산자를 사용할 때도 아래와 같이 Sort Unique 오퍼레이션이 나타난다.(DISTINCT 도 동일)**(UNION ALL 은 그냥 다 하는 거여서 Sort Unique 연산 x)**
+
+**(5) Sort Join**
+
+→ Sort Join 오퍼레이션은 소트 머지 조인을 수행할 때 나타난다.
+
+```sql
+select /*+ ordered use_merge(e) */ *
+from dept d, emp e
+where d.deptno = e.deptno
+
+-- 실행 계획
+SELECT STATEMENT
+ MERGE JOIN
+  SORT JOIN
+   TABLE ACCESS FULL DEPT
+  SORT JOIN
+   TABLE ACCESS FULL EMP
+```
+
+**(6) Window Sort**
+
+```sql
+select empno, ename, job, mgr, sal
+      ,avg(sal) over (partition by deptno)
+from emp;
+
+-- 실행 계획
+SELECT STATEMENT
+ WINDOW SORT
+  TABLE ACCESS FULL EMP
+```
