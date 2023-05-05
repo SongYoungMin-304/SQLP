@@ -1803,3 +1803,431 @@ SELECT STATEMENT
  WINDOW SORT
   TABLE ACCESS FULL EMP
 ```
+
+## 소트가 발생하지 않도록 SQL 작성
+
+### Union vs Union All
+
+```sql
+select 결제번호, 주문번호, 결제금액, 주문일자
+from   결제
+where 결제수단코드 = 'M' and 결제일자 = '20180316'
+union
+select 결제번호, 주문번호, 결제금액, 주문일자
+from   결제
+where 결제수단코드 = 'C' and 결제일자 = '20180316'
+```
+
+- 중복 가능성이 없지만 UNION 을 사용함으로 인해 소트 연산을 발생시키고 있다
+- 위아래가 상호 배타적이니까 UNION ALL을 사용하는게 좋다.(소트 연산 생략 가능)
+
+```sql
+select 결제번호, 주문번호, 결제금액, 주문일자
+from   결제
+where 결제일자 = '20180316'
+union
+select 결제번호, 주문번호, 결제금액, 주문일자
+from   결제
+where 주문일자 = '20180316'
+```
+
+- 상호배타적인 조건이 아니기 때문에 UNION 을 써야됨(소트 연산)
+
+```sql
+select 결제번호, 주문번호, 결제금액, 주문일자
+from   결제
+where 결제일자 = '20180316'
+union all
+select 결제번호, 주문번호, 결제금액, 주문일자
+from   결제
+where 주문일자 = '20180316'
+and   결제일자 <> '20180316'
+```
+
+→ 아래 내용 처럼 처리해서 소트 연산을 생략할 수 있다.
+
+### Exists 활용
+
+```sql
+select DISTINCT p.상품번호, p.상품명, p.상품가격, ...
+from 상품 p, 계약 c
+where p.상품유형코드 = :pclscd
+and   c.상품번호 = p.상품번호
+and   c.계약일자 between :dt1 and :dt2
+and   c.계약구분코드 :ctpcd
+```
+
+- 상품과 계약을 use_nl 조인을 하고 hash(unique)를 통해서 필터한다.(상품수가 적고 계약 수가 많을 수록 비효율적)
+
+```sql
+select p.상품번호, p.상품명, p.상품가격,...
+from   상품 p
+where  p.상품유형코드 = :pclscd
+and    EXISTS (select 'x' from 계약 c
+               where c.상품번호 = p.상품번호
+               and   c.계약일자 between : dt1 and : dt2 
+               and   c.계약구분코드 = : ctpcd )
+```
+
+- Exists 서브쿼리는 데이터 존재 여부만 확인하면 되기 때문에 조건절을 만족하는 데이터를 모두 읽지 않는다.
+- 즉 상품에서 for 문을 돌면서 계약으로 넘어갈때 계약에 존재만 하면 바로 넘어가서 계약을 보는 범위가 적다
+
+## 인덱스를 이용한 소트 연산 생략
+
+### Sort Order By 생략
+
+```sql
+select 거래일시, 체결건수, 체결수량, 거래대금
+from   종목거래
+where  종목코드 ='KR123456'
+order by 거래일시
+```
+
+**case1) 인덱스가 [종목코드 + 거래일시] 아닌경우**
+
+```sql
+SELECT STATEMENT
+ SORT ORDER BY
+  TABLE ACCESS BY INDEX ROWID 종목
+   INDEX RANGE SCAN           종목거래_N1
+```
+
+- 만족하는 레코드를 전체 읽은 다음에 SORT을 해야한다.
+
+**case2) 인덱스가 [종목코드 + 거래일시] 인 경우**
+
+```sql
+SELECT STATEMENT
+  TABLE ACCESS BY INDEX ROWID 종목
+   INDEX RANGE SCAN           종목거래_N1
+```
+
+- 종목코드를 통해서 데이터에 접근하면 그냥 순서대로 가져오면 정렬된거다(인덱스인 종목코드. 거래일시 순으로 정렬이 되어있는 거니까)
+
+### Top N 쿼리
+
+```sql
+select * from (
+  select 거래일시, 체결건수, 체결건수, 체결수량, 거래대금
+  from 종목거래
+  where 종목코드 = 'KR123456'
+  and   거래일시 >= '20180304'
+  order by 거래일시
+)
+where rownum <=10
+```
+
+- 부분처리가 불가능해 보이지만 만약 인덱스를 [종목코드 + 거래일시] 순으로 구성하면
+아래 그림처럼 인덱스를 순서대로 10개만 읽으면 되기 때문에 부분 처리에 효율적이다.
+
+![image](https://user-images.githubusercontent.com/56577599/236443397-915b2979-8be7-4435-bfce-00078c521b1f.png)
+
+
+```sql
+SELECT STATEMENT 
+ COUNT (STOPKEY)
+   VIEW
+    TABLE ACCESS (BY INDEX ROWID) OF 종목거래 (TABLE)
+      INDEX (RANGE SCAN) OF '종목거래_PK' (INDEX (UNIQUE))
+```
+
+- Sort Order By 오퍼레이션이 보이지 않는다. 대신 COUNT(STOPKEY) 가 보인다.
+→ 이는 조건절에 부합하는 레코드가 아무리 많아도 그 부분처리 가
+- **Top N Stopkey 알고리즘**
+
+**페이징 처리**
+
+```sql
+select * 
+from (
+ select rownum no, a.*
+ from
+  (
+   
+   /* SQL Body */
+   ) a
+where rownum <= (:page * 10)
+)
+where no >= (:page -1 )*10 +1
+```
+
+- Top N 쿼리이므로 ROWNUM 으로 지정한 건수만큼 결과 레코드를 얻으면 거기서 바로 멈춘다.
+- 뒤쪽 페이지로 이동할수록 읽는 데이터량도 많아지는 단점이 있지만, 보통 앞쪽 일부 데이터만 확인하므로 문제가 되지 않는다.
+
+```sql
+select * 
+from (
+  select rownum no, a.*
+  from
+   (
+     select 거래일시, 체결건수, 체결수량, 거래대금
+     from  종목거래
+     where 종목코드 ='KR123456'
+     and   거래일시 >='20180304'
+     order by 거래일시
+   ) a
+)
+where no between (:page - 1)*10 + 1 and(:page *10)
+
+-- 실행계획
+SELECT STATEMENT 
+ FILTER
+  VIEW 
+    COUNT
+      VIEW
+       TABLE ACCESS (BY INDEX ROWID) OF '종목거래'
+         INDEX(RANGE SCAN) OF 종목거래_PK
+```
+
+- 해당 쿼리가 간단해 보이지만 Top N 쿼리 방식을 사용할 수 없기 때문에 굉장히 비효율적이다.
+- Count 옆에 Stopkey 가 없음을 확인하기 바란다.(전체범위를 처리한다는 뜻)
+
+![image](https://user-images.githubusercontent.com/56577599/236443432-25e9549b-1603-458f-ba3a-7ad58e5f0098.png)
+
+
+**최소값/최대값 구하기**
+
+```sql
+SELECT MAX(SAL) FROM EMP;
+
+-- 실행 계획
+SELECT STATEMENT 
+ SORT (AGGREGATE)
+  TABLE ACCESS (FULL) OF 'EMP'
+```
+
+- SORT (AGGREGATE) 는 SORT AREA 를 사용한다는 뜻
+
+```sql
+CREATE INDEX EMP_X1 ON EMP(SAL)
+
+SELECT MAX(SAL) FROM EMP;
+
+-- 실행계획
+SELECT STATEMENT
+  SORT (AGGREGATE)
+   INDEX (FULL SCAN (MIN/MAX)) OF 'EMP_X1'  
+```
+
+- 인덱스는 정렬돼 있으므로 이를 이용하면 전체 데이터를 읽지 않고도 최소 또는 최대값을 쉽게 찾을수 있다.( 오라클 8i 부터, 그 전에는 인덱스가 있어도 전체 데이터를 읽는다.)
+
+※ 전체 데이터를 읽지 않고 인덱스를 이용해 최소 또는 최대값을 구하려면, 조건절 컬럼과 MIN/MAX 함수 인자 컬럼이 모두 인덱스에 포함돼 있어야 한다.
+
+**인덱스 [DEPTNO, MGR, SAL]**
+
+```sql
+CREATE INDEX EMP_X1 ON EMP(DEPTNO, MGR, SAL);
+
+SELECT MAX(SAL) FROM EMP WHERE DEPTNO = 30 AND MGR = 7698;
+
+-- 실행계획
+SELECT STATEMENT 
+  SORT (AGGREGATE)
+   FIRST ROW
+     INDEX (RANGE SCAN(MIN/MAX)) OF 'EMP_X1'
+```
+
+- 조건절 컬럼과 MAX 컬럼이 모두 인덱스에 포함돼 있고, 인덱스 선두 컬럼이 = 조건이므로 가장 오른쪽에 있는 값 하나를 읽는다.
+- **First Row Stopkey 알고리즘**
+
+![image](https://user-images.githubusercontent.com/56577599/236443457-e356f7f3-5040-4e4d-9d70-81d865ff7987.png)
+
+
+- 조건절 컬럼이 둘 다 인덱스 선두 컬럼이 아니 Index Range Scan 불가능
+
+**인덱스 [DEPTNO, SAL, MGR]**
+
+```sql
+CREATE INDEX EMP_X1 ON EMP(DEPTNO, SAL, MGR)
+
+SELECT MAX(SAL) FROM EMP WHERE DEPTNO = 30 AND MGR = 7698
+
+SELECT STATEMENT
+  SORT (AGGREGATE)
+    FIRST ROW
+      INDEX(RANGE SCAN(MIN/MAX)) OF 'EMP_X1' (INDEX)
+```
+
+- DEPTNO = 30 조건을 만적하는 범위에서 내려가서 SAL 값을 읽고 그 중에서 MGR 조건에 만족하는 값을 반환하면 된다.(DEPTNO 는 액세스 조건, MGR은 필터 조건이다.)
+- 조건절 컬럼과 MAX 컬럼이 모두 인덱스에 포함돼 있으므로 First Row Stopkey 알고리즘 작동
+
+![image](https://user-images.githubusercontent.com/56577599/236443490-1a991858-59f0-4c27-b19b-49090a51282c.png)
+
+
+**인덱스 [SAL, DEPTNO, MGR]**
+
+```sql
+CREATE INDEX EMP_X1 ON EMP(SAL, DEPTNO, MGR)
+
+SELECT MAX(SAL) FROM EMP WHERE DEPTNO = 30 AND MGR =7698;
+
+-- 실행게획
+SELECT STATEMENT 
+  SORT (AGGREGATE)
+    FIRST ROW
+      INDEX (FULL SCAN (MIN/MAX)
+```
+
+- 조건절 컬럼이 인덱스 선두 컬럼이 아니므로 인덱스 전체를 스캔하다가 반환해야 한다.
+
+![image](https://user-images.githubusercontent.com/56577599/236443512-4b1df453-9b78-4b2c-ba9e-f86dd4981354.png)
+
+
+**인덱스 [DEPTNO, SAL]**
+
+```sql
+CREATE INDEX EMP_X1 ON EMP(DEPTNO, SAL);
+
+SELECT MAX(SAL) FROM EMP WHERE DEPTNO = 30 AND MGR = 7698
+
+-- 실행계획
+SELECT STATEMENT
+  SORT (AGGREGATE)
+    TABLE ACCESS (BY INDEX ROWID) OF 'EMP'
+      INDEX (RANGE SCAN) OF 'EMP_X1'(INDEX)
+```
+
+- 조건절 컬럼과 MAX 컬럼 중 어느 하나가 인덱스에 포함되어있지 않은 경우
+- 인덱스 스캔을 해야함, 그 이후에 테이블 스캔을 하면서 필터를 해야되서 FIRST ROW 가 동작 안함
+
+![image](https://user-images.githubusercontent.com/56577599/236443532-777b48d4-857c-45bf-ba48-02905e080631.png)
+
+
+※ 동일한 인덱스를 가지고 있어도 TOP 쿼리로 바꾸면 효율적
+
+```sql
+CREATE INDEX EMP_X1 ON EMP(DEPTNO, SAL)
+
+SELECT * 
+FROM (
+  SELECT SAL
+  FROM EMP
+  WHERE DEPTNO = 30
+  AND MGR = 7698
+  ORDER BY SAL DESC
+)
+WHERE ROWNUM <=1;
+
+SELECT STATEMENT
+  COUNT (STOPKEY)
+    VIEW 
+      TABLE ACCESS (BY INDEX ROWID) OF 'EMP' (TABLE)
+        INDEX (RANGE SCAN DESCENDING) OF 'EMP_X1' (INDEX)
+```
+
+![image](https://user-images.githubusercontent.com/56577599/236443555-f402e6cf-1222-471c-b0ed-00c275591eca.png)
+
+
+**Sort Group By 생략**
+
+```sql
+select region, avg(age), count(*)
+from customer
+group by region
+
+-- 실행계획
+SELECT STATEMENT
+ SORT GROUP BY NOSORT
+  TABLE ACCESS BY INDEX ROWID CUSTOMER
+    INDEX FULL SCAN CUSTOMER_X01
+```
+
+- region 이 선두 컬럼인 인덱스를 사용하면 Sort Group by 연산을 생략할 수 있다.
+- 부분 처리도 가
+
+![image](https://user-images.githubusercontent.com/56577599/236443579-4c754884-03f9-473a-883a-edddda034aa0.png)
+
+
+## Sort Area를 적게 사용하도록 SQL 작성
+
+- 소트 연산이 불가피하다면 메모리 내에서 처리를 완료할 수 있도록 노력해야 한다.
+- Sort Area 크기를 늘리는 방법도 있지만, 그전에 Sort Area를 적게 사용할 방법부터 찾는 것이 우선이다.
+
+### 소트 데이터 줄이기
+
+[1번]
+
+```sql
+select lpad(상품번호, 30)
+from 주문상품
+where 주문일시 between :start and :end
+order by 상품번호
+```
+
+[2번]
+
+```sql
+select lpad(상품번호, 30)
+from(
+select 상품번호
+from 주문상품
+where 주문일시 between :start and :end
+order by 상품번호
+)
+```
+
+- 1번은 가공한 결과 집합을 Sort Area 에 담고 2번은 가공하지 않은 상태로 정렬을 완료하고 나서 최종 출력할 때 가공 한다.
+- 따라서 2번 SQL이 Sort Area를 훨씬 적게 사용한다.
+
+[1번]
+
+```sql
+select *
+from 예수금원장
+order by 총예수금 desc
+```
+
+[2번]
+
+```sql
+select 계좌번호, 총예수금
+from 예수금원장
+order by 총예수금 desc
+```
+
+- 2번 SQL이 적게 사용한다.
+- 1번은 모든 컬럼을 Sort Area를 저장하지만 2번은 특정 컬럼만 저장하기 때문
+
+### Top N 쿼리의 소트 부하 경감 원리
+
+- 전교생 1000명 중 가장 큰 열 명을 선발하는 방법
+
+1) 전교생을 운동장에 집합시킨다.
+
+2) 맨 앞줄 맨 왼쪽에 있는 학생 열 명을 단상 앞으로 불러 키 순서대로 세운다.
+
+3) 나머지 990명을 한 명씩 교실로 들여보내면서 현재 Top 10 위치에 있는 학생과 키를 비교한다. 더 큰 학생이 나타나면, 현재 Top 10 위치에 있는 학생을 교실로 들여보내다.
+
+4) Top 10에 새로 진입한 학생 키에 맞춰 자리를 재배치한다.
+
+![image](https://user-images.githubusercontent.com/56577599/236443638-4cf32871-a0f2-4c8e-bc8e-77faa39feabd.png)
+
+
+```sql
+select * 
+from ( 
+  select rownum no, a.* 
+  from 
+   (
+    select 거래일시, 체결건수, 체결수량, 거래대금 
+    from 종목거래 
+    where 종목고드 = ' KR1 23456 ' 
+    and 거래일시 >= '20180304 ' 
+    order by 거래일시 
+    ) a 
+ where rownum <= ( : page * 10 ) 
+ ) 
+where no >= (:page-1)*10 + 1
+
+-- 실행계획
+STATEMENT
+ COUNT STOPKEY 
+   VIEW 
+     SORT ORDER BY STOPKEY
+       TABLE ACCESS FULL 종목거래
+```
+
+- sort 연산을 생략할 수 는 없지만 위에 내용 처럼 sort area를 많이 사용하지는 않는다.
+- STOPKEY 를 통해서 Top N 소트 알고리즘이 작동한다는 것을 볼 수 있다.
+
+※ 윈도우 함수 중 rank 나 row_number 함수는 max 함수보다 소트 부하가 적다. Top N 소트 알고리즘이 작동하기 때
