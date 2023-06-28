@@ -2231,3 +2231,5 @@ STATEMENT
 - STOPKEY 를 통해서 Top N 소트 알고리즘이 작동한다는 것을 볼 수 있다.
 
 ※ 윈도우 함수 중 rank 나 row_number 함수는 max 함수보다 소트 부하가 적다. Top N 소트 알고리즘이 작동하기 때
+
+...
